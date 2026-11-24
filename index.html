@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <title>A Place To Rest DB</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="config.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="A Place To Rest, strona główna">
+        <span>A Place To Rest<span class="brand-dot">.</span></span>
+      </a>
+      <div class="topbar-right">
+        <button id="sign-out" class="button button-quiet" hidden>Wyloguj się</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="welcome" class="welcome">
+        <div class="welcome-main">
+          <h1>Wszystko, co tworzymy.<br><em>W jednym miejscu.</em></h1>
+          <p>Modele, grafiki, dźwięki i wszystkie małe rzeczy, z których powstaje Nasza gra.</p>
+          <button id="sign-in" class="button button-primary">
+            <span class="google-icon" aria-hidden="true">G</span> Zaloguj się przez Google <span aria-hidden="true">↗</span>
+          </button>
+        </div>
+      </section>
+
+      <section id="workspace" class="workspace" hidden>
+        <div class="workspace-heading">
+          <div>
+            <h1>Pliki zespołu<span class="brand-dot">.</span></h1>
+            <p>Wszystko, nad czym razem pracujemy.</p>
+          </div>
+          <div class="actions">
+            <button id="new-folder" class="button button-secondary">+ Nowy folder</button>
+            <button id="upload" class="button button-primary">↑ Dodaj pliki</button>
+            <input id="file-input" type="file" multiple hidden>
+          </div>
+        </div>
+        <div class="file-panel">
+          <div class="panel-top">
+            <nav id="breadcrumbs" class="breadcrumbs" aria-label="Ścieżka folderu"></nav>
+            <button id="refresh" class="icon-button" aria-label="Odśwież pliki" title="Odśwież">↻</button>
+          </div>
+          <div class="table-head"><span>NAZWA</span><span>OSTATNIA ZMIANA</span><span>ROZMIAR</span><span></span></div>
+          <div id="files" class="file-list"></div>
+          <div id="empty" class="empty" hidden><span>✳</span><strong>Tu jeszcze nic nie ma</strong><p>Dodaj pierwszy plik lub utwórz folder.</p></div>
+        </div>
+      </section>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    </main>
+    <footer><span>Autor: Filip Jedliński</span></footer>
+  </div>
+</body>
+</html>
