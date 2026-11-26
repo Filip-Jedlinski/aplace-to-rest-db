@@ -182,10 +182,17 @@
           </select>
         </label>
         <label class="form-field">
-          <span>Plik z Drive</span>
+          <span>Plik z Drive — aktualny folder</span>
           <select id="task-file" name="fileId">
             <option value="">Bez powiązania</option>
           </select>
+        </label>
+        <label class="form-field task-file-search">
+          <span>Szukaj pliku także w podfolderach projektu</span>
+          <input id="task-file-search" type="search" minlength="2" maxlength="80"
+            placeholder="Wpisz co najmniej 2 znaki nazwy" autocomplete="off">
+          <small id="task-file-search-hint">Wyszukiwanie obejmuje cały projekt, nie pozostałe foldery Drive.</small>
+          <div id="task-file-results" class="task-file-results"></div>
         </label>
       </div>
       <section id="task-comments-section" class="task-comments-section" hidden>

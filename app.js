@@ -35,6 +35,7 @@ const elements = Object.fromEntries([
   "done-list", "new-task", "task-dialog", "task-form", "task-dialog-title",
   "close-task-dialog", "cancel-task", "task-title", "task-description",
   "task-assignee", "task-status", "task-priority", "task-file",
+  "task-file-search", "task-file-search-hint", "task-file-results",
   "task-comments-section", "task-comments", "task-new-comment", "delete-task",
   "dashboard-open-count", "dashboard-progress-label", "dashboard-mine-count",
   "dashboard-doing-count", "dashboard-done-count", "dashboard-my-tasks",
@@ -52,6 +53,9 @@ let activeView = null;
 let taskFilter = "all";
 let visibleFileCount = FILE_RENDER_BATCH;
 let visibleFileSource = [];
+let fileSearchTimer;
+let fileSearchRequest = 0;
+const ancestorCache = new Map();
 let editedTask = null;
 const pendingTaskIds = new Set();
 let currentUserEmail = "";
@@ -936,6 +940,9 @@ function openTaskDialog(task = null) {
     editedTask = task ? structuredClone(task) : null;
     elements["task-form"].reset();
     populateTaskFileOptions(task?.linkedFile || null);
+    elements["task-file-results"].replaceChildren();
+    elements["task-file-search-hint"].textContent =
+      "Wyszukiwanie obejmuje cały projekt, nie pozostałe foldery Drive.";
     elements["task-dialog-title"].textContent = task ? "Edytuj task" : "Nowy task";
     elements["delete-task"].hidden = !task;
     elements["task-comments-section"].hidden = !task?.comments.length;
@@ -980,6 +987,94 @@ function populateTaskFileOptions(linkedFile) {
     webViewLink: file.webViewLink || null
   }));
   elements["task-file"].dataset.options = JSON.stringify(optionData);
+}
+
+async function searchProjectFiles(query) {
+  const requestId = ++fileSearchRequest;
+  const normalized = query.trim();
+  if (normalized.length < 2) {
+    elements["task-file-results"].replaceChildren();
+    elements["task-file-search-hint"].textContent =
+      "Wpisz co najmniej 2 znaki nazwy pliku.";
+    return;
+  }
+  elements["task-file-search-hint"].textContent = "Szukam w folderze projektu...";
+  const escaped = normalized.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  const url = new URL(API);
+  url.searchParams.set(
+    "q",
+    `trashed = false and name contains '${escaped}' and mimeType != '${FOLDER_TYPE}'`
+  );
+  url.searchParams.set("fields", "files(id,name,mimeType,webViewLink,parents)");
+  url.searchParams.set("pageSize", "30");
+  const result = await (await driveFetch(url)).json();
+  const candidates = (result.files || []).filter(file => file.id !== tasksFolderId);
+  const inProject = await mapWithConcurrency(candidates, 4, async file => (
+    await isWithinProject(file.parents || [], file.id) ? file : null
+  ));
+  if (requestId !== fileSearchRequest || !elements["task-dialog"].open) return;
+  renderTaskFileResults(inProject.filter(Boolean));
+}
+
+async function isWithinProject(parents, fileId, visited = new Set()) {
+  if (parents.includes(config.folderId)) return true;
+  if (parents.length === 0 || visited.has(fileId)) return false;
+  visited.add(fileId);
+  const current = ancestorCache.get(fileId);
+  if (current) return isWithinProject(current, fileId, visited);
+  for (const parentId of parents) {
+    if (parentId === config.folderId) return true;
+    let grandParents = ancestorCache.get(parentId);
+    if (!grandParents) {
+      const parent = await (await driveFetch(fileUrl(parentId, { fields: "id,parents,trashed" }))).json();
+      if (parent.trashed) continue;
+      grandParents = parent.parents || [];
+      ancestorCache.set(parentId, grandParents);
+    }
+    if (await isWithinProject(grandParents, parentId, visited)) return true;
+  }
+  return false;
+}
+
+function renderTaskFileResults(files) {
+  elements["task-file-results"].replaceChildren();
+  if (!files.length) {
+    elements["task-file-search-hint"].textContent =
+      "Nie znaleziono pliku o tej nazwie wewnątrz folderu projektu.";
+    return;
+  }
+  elements["task-file-search-hint"].textContent =
+    `Znaleziono: ${files.length}. Wybierz wynik, aby przypiąć go do taska.`;
+  const fragment = document.createDocumentFragment();
+  for (const file of files) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "task-file-result";
+    button.textContent = file.name;
+    button.title = file.webViewLink || file.name;
+    button.addEventListener("click", () => selectTaskFile(file));
+    fragment.append(button);
+  }
+  elements["task-file-results"].append(fragment);
+}
+
+function selectTaskFile(file) {
+  let option = [...elements["task-file"].options].find(item => item.value === file.id);
+  if (!option) {
+    addSelectOption(elements["task-file"], file.id, file.name);
+    option = elements["task-file"].options[elements["task-file"].options.length - 1];
+    const options = JSON.parse(elements["task-file"].dataset.options || "[]");
+    options.push({
+      id: file.id,
+      name: file.name,
+      webViewLink: file.webViewLink || null
+    });
+    elements["task-file"].dataset.options = JSON.stringify(options);
+  }
+  elements["task-file"].value = option.value;
+  elements["task-file-results"].replaceChildren();
+  elements["task-file-search"].value = "";
+  elements["task-file-search-hint"].textContent = `Wybrano: ${file.name}`;
 }
 
 function getSelectedTaskFile() {
@@ -1255,6 +1350,18 @@ elements["task-form"].addEventListener("submit", event => {
 elements["task-dialog"].addEventListener("cancel", event => {
   event.preventDefault();
   closeTaskDialog();
+});
+elements["task-file-search"].addEventListener("input", event => {
+  clearTimeout(fileSearchTimer);
+  const query = event.target.value;
+  fileSearchTimer = setTimeout(() => {
+    searchProjectFiles(query).catch(error => {
+      if (elements["task-dialog"].open) {
+        elements["task-file-search-hint"].textContent =
+          `Nie udało się wyszukać pliku: ${error.message}`;
+      }
+    });
+  }, 350);
 });
 elements["file-input"].addEventListener("change", event => {
   const files = [...event.target.files];
