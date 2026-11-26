@@ -18,6 +18,10 @@
         <span>A Place To Rest<span class="brand-dot">.</span></span>
       </a>
       <div class="topbar-right">
+        <div id="profile-control" class="profile-control" hidden>
+          <span class="profile-avatar" id="profile-avatar" aria-hidden="true"></span>
+          <span id="current-member"></span>
+        </div>
         <button id="sign-out" class="button button-quiet" hidden>Wyloguj się</button>
       </div>
     </header>
@@ -36,16 +40,24 @@
       <section id="workspace" class="workspace" hidden>
         <div class="workspace-heading">
           <div>
-            <h1>Pliki zespołu<span class="brand-dot">.</span></h1>
-            <p>Wszystko, nad czym razem pracujemy.</p>
+            <p class="eyebrow">PRACOWNIA ZESPOŁU</p>
+            <h1 id="workspace-title">Pliki zespołu<span class="brand-dot">.</span></h1>
+            <p id="workspace-subtitle">Wszystko, nad czym razem pracujemy.</p>
           </div>
-          <div class="actions">
+          <div id="file-actions" class="actions">
             <button id="new-folder" class="button button-secondary">+ Nowy folder</button>
             <button id="upload" class="button button-primary">↑ Dodaj pliki</button>
             <input id="file-input" type="file" multiple hidden>
           </div>
+          <div id="task-actions" class="actions" hidden>
+            <button id="new-task" class="button button-primary">+ Nowy task</button>
+          </div>
         </div>
-        <div class="file-panel">
+        <nav class="view-switcher" aria-label="Podstrony pracowni">
+          <a id="files-tab" class="active" href="#files" aria-current="page">Pliki</a>
+          <a id="tasks-tab" href="#tasks">Taski <span id="task-tab-count"></span></a>
+        </nav>
+        <div id="files-panel" class="file-panel">
           <div class="panel-top">
             <nav id="breadcrumbs" class="breadcrumbs" aria-label="Ścieżka folderu"></nav>
             <button id="refresh" class="icon-button" aria-label="Odśwież pliki" title="Odśwież">↻</button>
@@ -53,11 +65,97 @@
           <div class="table-head"><span>NAZWA</span><span>OSTATNIA ZMIANA</span><span>ROZMIAR</span><span></span></div>
           <div id="files" class="file-list"></div>
           <div id="empty" class="empty" hidden><span>✳</span><strong>Tu jeszcze nic nie ma</strong><p>Dodaj pierwszy plik lub utwórz folder.</p></div>
+          <div class="load-more-wrap">
+            <button id="load-more-files" class="button button-secondary" hidden>Pokaż więcej plików</button>
+          </div>
         </div>
+        <section id="tasks-panel" class="tasks-panel" aria-label="Taski zespołu" hidden>
+          <div class="task-toolbar">
+            <div id="task-filters" class="task-filters" aria-label="Filtruj po osobie">
+              <button class="active" type="button" data-assignee="all">Wszyscy</button>
+            </div>
+            <span id="task-summary" class="task-summary"></span>
+          </div>
+          <div class="task-board">
+            <section class="task-column" data-status="todo">
+              <div class="task-column-heading"><h2>Do zrobienia</h2><span id="todo-count">0</span></div>
+              <div id="todo-list" class="task-list"></div>
+            </section>
+            <section class="task-column" data-status="doing">
+              <div class="task-column-heading"><h2>W trakcie</h2><span id="doing-count">0</span></div>
+              <div id="doing-list" class="task-list"></div>
+            </section>
+            <section class="task-column" data-status="done">
+              <div class="task-column-heading"><h2>Gotowe</h2><span id="done-count">0</span></div>
+              <div id="done-list" class="task-list"></div>
+            </section>
+          </div>
+        </section>
       </section>
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     </main>
     <footer><span>Autor: Filip Jedliński</span></footer>
   </div>
+  <dialog id="task-dialog" class="task-dialog">
+    <form id="task-form">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">TASK ZESPOŁU</p>
+          <h2 id="task-dialog-title">Nowy task</h2>
+        </div>
+        <button id="close-task-dialog" class="icon-button" type="button" aria-label="Zamknij">×</button>
+      </div>
+      <label class="form-field">
+        <span>Tytuł</span>
+        <input id="task-title" name="title" maxlength="120" required autocomplete="off">
+      </label>
+      <label class="form-field">
+        <span>Opis</span>
+        <textarea id="task-description" name="description" rows="4" maxlength="4000" placeholder="Co trzeba zrobić?"></textarea>
+      </label>
+      <div class="form-grid">
+        <label class="form-field">
+          <span>Osoba</span>
+          <select id="task-assignee" name="assignee" required></select>
+        </label>
+        <label class="form-field">
+          <span>Status</span>
+          <select id="task-status" name="status" required>
+            <option value="todo">Do zrobienia</option>
+            <option value="doing">W trakcie</option>
+            <option value="done">Gotowe</option>
+          </select>
+        </label>
+        <label class="form-field">
+          <span>Priorytet</span>
+          <select id="task-priority" name="priority" required>
+            <option value="low">Niski</option>
+            <option value="normal">Normalny</option>
+            <option value="high">Wysoki</option>
+          </select>
+        </label>
+        <label class="form-field">
+          <span>Plik z Drive</span>
+          <select id="task-file" name="fileId">
+            <option value="">Bez powiązania</option>
+          </select>
+        </label>
+      </div>
+      <section id="task-comments-section" class="task-comments-section" hidden>
+        <h3>Komentarze</h3>
+        <div id="task-comments" class="task-comments"></div>
+      </section>
+      <label class="form-field">
+        <span>Dodaj komentarz</span>
+        <textarea id="task-new-comment" rows="2" maxlength="2000" placeholder="Krótka aktualizacja lub pytanie"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button id="delete-task" class="button button-danger" type="button" hidden>Usuń task</button>
+        <span class="dialog-spacer"></span>
+        <button id="cancel-task" class="button button-secondary" type="button">Anuluj</button>
+        <button class="button button-primary" type="submit">Zapisz task</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>

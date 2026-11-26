@@ -1,20 +1,59 @@
 "use strict";
 
-const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
+const DRIVE_SCOPE = "openid email https://www.googleapis.com/auth/drive";
 const FOLDER_TYPE = "application/vnd.google-apps.folder";
 const API = "https://www.googleapis.com/drive/v3/files";
 const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3/files";
 const CHUNK_SIZE = 8 * 1024 * 1024;
 const SESSION_KEY = "pracownia-drive-session";
+const TASK_VERSION = 1;
+const TASK_FILE_SUFFIX = ".json";
+const TASK_FOLDER_CACHE_KEY = "pracownia-tasks-folder";
+const TASK_CACHE_KEY = "pracownia-tasks-cache";
+const CACHE_TTL = 60_000;
+const TASK_REFRESH_INTERVAL = 60_000;
+const FILE_RENDER_BATCH = 200;
+const TASK_STATUSES = {
+  todo: "Do zrobienia",
+  doing: "W trakcie",
+  done: "Gotowe"
+};
+const PRIORITY_LABELS = {
+  low: "Niski",
+  normal: "Normalny",
+  high: "Wysoki"
+};
 const config = window.APP_CONFIG;
 const elements = Object.fromEntries([
   "welcome", "workspace", "sign-in", "sign-out", "new-folder", "upload",
-  "file-input", "refresh", "breadcrumbs", "files", "empty", "notice"
+  "file-input", "refresh", "breadcrumbs", "files", "empty", "notice",
+  "profile-control", "profile-avatar", "current-member", "workspace-title", "workspace-subtitle",
+  "file-actions", "task-actions", "files-tab", "tasks-tab", "files-panel",
+  "tasks-panel", "task-tab-count", "task-filters", "task-summary",
+  "todo-count", "doing-count", "done-count", "todo-list", "doing-list",
+  "done-list", "new-task", "task-dialog", "task-form", "task-dialog-title",
+  "close-task-dialog", "cancel-task", "task-title", "task-description",
+  "task-assignee", "task-status", "task-priority", "task-file",
+  "task-comments-section", "task-comments", "task-new-comment", "delete-task",
+  "load-more-files"
 ].map(id => [id, document.getElementById(id)]));
 
 let token = null;
 let tokenClient = null;
 let path = [];
+let tasks = [];
+let tasksFolderId = null;
+let currentFileOptions = [];
+let activeView = null;
+let taskFilter = "all";
+let visibleFileCount = FILE_RENDER_BATCH;
+let visibleFileSource = [];
+let editedTask = null;
+let currentUserEmail = "";
+let currentMember = null;
+let loadingTasks = null;
+const folderCache = new Map();
+const taskContentCache = new Map();
 let busy = false;
 let noticeTimer;
 let expiryTimer;
@@ -29,11 +68,12 @@ function notice(message, isError = false) {
 
 function setBusy(value) {
   busy = value;
-  for (const id of ["sign-in", "sign-out", "new-folder", "upload", "refresh"]) {
+  for (const id of ["sign-in", "sign-out", "new-folder", "upload", "refresh", "new-task"]) {
     elements[id].disabled = value;
   }
   elements.files.querySelectorAll("button").forEach(button => { button.disabled = value; });
   elements.breadcrumbs.querySelectorAll("button").forEach(button => { button.disabled = value; });
+  elements["tasks-panel"].querySelectorAll("button").forEach(button => { button.disabled = value; });
 }
 
 async function run(action) {
@@ -65,11 +105,27 @@ function signOut(revoke = true, clearStorage = true) {
   clearTimeout(expiryTimer);
   token = null;
   path = [];
+  tasks = [];
+  tasksFolderId = null;
+  currentUserEmail = "";
+  currentMember = null;
+  loadingTasks = null;
+  folderCache.clear();
+  taskContentCache.clear();
+  try {
+    sessionStorage.removeItem(TASK_CACHE_KEY);
+  } catch {
+    // Wylogowanie nie może zależeć od dostępu do pamięci sesji.
+  }
   elements.files.replaceChildren();
   elements.breadcrumbs.replaceChildren();
+  closeTaskDialog();
+  activeView = null;
+  elements["task-tab-count"].textContent = "";
   elements.welcome.hidden = false;
   elements.workspace.hidden = true;
   elements["sign-out"].hidden = true;
+  elements["profile-control"].hidden = true;
   return !clearStorage || clearStoredSession();
 }
 
@@ -105,11 +161,14 @@ async function connectToFolder() {
   const activeToken = token;
   const root = await (await driveFetch(fileUrl(config.folderId, { fields: "id,name,mimeType,trashed" }))).json();
   if (root.mimeType !== FOLDER_TYPE || root.trashed) throw new Error("Skonfigurowany element nie jest dostępnym folderem.");
-  await showFolder([{ id: root.id, name: root.name }]);
+  await identifyCurrentMember();
+  path = [{ id: root.id, name: root.name }];
   if (!token || token !== activeToken) throw new Error("Sesja uległa zmianie. Zaloguj się ponownie.");
   elements.welcome.hidden = true;
   elements.workspace.hidden = false;
   elements["sign-out"].hidden = false;
+  elements["profile-control"].hidden = false;
+  await navigateFromHash();
 }
 
 function restoreSession() {
@@ -139,6 +198,20 @@ function restoreSession() {
       throw error;
     }
   });
+}
+
+async function identifyCurrentMember() {
+  const profile = await (await driveFetch(new URL("https://www.googleapis.com/oauth2/v3/userinfo"), {
+    headers: { Accept: "application/json" }
+  })).json();
+  currentUserEmail = String(profile.email || "").trim().toLowerCase();
+  currentMember = config.teamByEmail?.[currentUserEmail] || null;
+  elements["current-member"].textContent = currentMember || currentUserEmail || "Nieznane konto";
+  elements["profile-avatar"].textContent = (currentMember || "?").slice(0, 1).toUpperCase();
+  elements["profile-control"].title = currentUserEmail;
+  if (!currentMember) {
+    notice(`Konto ${currentUserEmail || "Google"} nie jest przypisane do Malibura, Filipa ani Arka. Pliki działają, ale taski są tylko do odczytu.`, true);
+  }
 }
 
 async function driveFetch(url, options = {}) {
@@ -171,7 +244,7 @@ async function getFiles(folderId) {
   do {
     const url = new URL(API);
     url.searchParams.set("q", `'${folderId}' in parents and trashed = false`);
-    url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,size,capabilities(canTrash))");
+    url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink,capabilities(canTrash))");
     url.searchParams.set("pageSize", "1000");
     url.searchParams.set("orderBy", "folder,name");
     if (pageToken) url.searchParams.set("pageToken", pageToken);
@@ -180,6 +253,214 @@ async function getFiles(folderId) {
     pageToken = result.nextPageToken;
   } while (pageToken);
   return files;
+}
+
+async function ensureTasksFolder() {
+  if (tasksFolderId) return tasksFolderId;
+  try {
+    const cached = JSON.parse(localStorage.getItem(TASK_FOLDER_CACHE_KEY) || "null");
+    if (cached?.rootId === config.folderId && typeof cached.folderId === "string") {
+      tasksFolderId = cached.folderId;
+      return tasksFolderId;
+    }
+  } catch {
+    localStorage.removeItem(TASK_FOLDER_CACHE_KEY);
+  }
+  const url = new URL(API);
+  url.searchParams.set("q", `'${config.folderId}' in parents and trashed = false and mimeType = '${FOLDER_TYPE}' and name = '${config.tasksFolderName}'`);
+  url.searchParams.set("fields", "files(id,name)");
+  const result = await (await driveFetch(url)).json();
+  if (result.files.length > 1) throw new Error("W Drive istnieje kilka systemowych folderów tasków. Usuń duplikaty i odśwież stronę.");
+  if (result.files[0]) {
+    tasksFolderId = result.files[0].id;
+    cacheTasksFolder();
+    return tasksFolderId;
+  }
+  const created = await (await driveFetch(API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: config.tasksFolderName,
+      mimeType: FOLDER_TYPE,
+      parents: [config.folderId]
+    })
+  })).json();
+  tasksFolderId = created.id;
+  cacheTasksFolder();
+  return tasksFolderId;
+}
+
+function cacheTasksFolder() {
+  try {
+    localStorage.setItem(TASK_FOLDER_CACHE_KEY, JSON.stringify({
+      rootId: config.folderId,
+      folderId: tasksFolderId
+    }));
+  } catch {
+    // Tasky nadal działają bez lokalnego cache.
+  }
+}
+
+function restoreTaskCache() {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(TASK_CACHE_KEY) || "[]");
+    for (const item of cached) {
+      if (item?.id && item.task && item.modifiedTime) taskContentCache.set(item.id, item);
+    }
+  } catch {
+    sessionStorage.removeItem(TASK_CACHE_KEY);
+  }
+}
+
+function persistTaskCache() {
+  try {
+    sessionStorage.setItem(TASK_CACHE_KEY, JSON.stringify([...taskContentCache.entries()].map(([id, item]) => ({
+      id,
+      modifiedTime: item.modifiedTime,
+      task: item.task
+    }))));
+  } catch {
+    // Cache jest tylko optymalizacją; brak miejsca nie blokuje tasków.
+  }
+}
+
+async function loadTasks({ force = false } = {}) {
+  if (loadingTasks) return loadingTasks;
+  loadingTasks = loadTasksInternal({ force });
+  try {
+    return await loadingTasks;
+  } finally {
+    loadingTasks = null;
+  }
+}
+
+async function loadTasksInternal({ force }) {
+  await ensureTasksFolder();
+  const taskFiles = (await getFiles(tasksFolderId)).filter(file => (
+    file.mimeType === "application/json" && file.name.endsWith(TASK_FILE_SUFFIX)
+  ));
+  const activeIds = new Set(taskFiles.map(file => file.id));
+  for (const id of taskContentCache.keys()) {
+    if (!activeIds.has(id)) taskContentCache.delete(id);
+  }
+  const loaded = await mapWithConcurrency(taskFiles, 4, async file => {
+    const cached = taskContentCache.get(file.id);
+    if (!force && cached?.modifiedTime === file.modifiedTime) return { ...cached.task, fileId: file.id };
+    const task = await (await driveFetch(fileUrl(file.id, { alt: "media" }))).json();
+    if (!isTaskRecord(task)) {
+      throw new Error(`Plik taska „${file.name}” ma nieprawidłowy format.`);
+    }
+    taskContentCache.set(file.id, { modifiedTime: file.modifiedTime, task });
+    return { ...task, fileId: file.id };
+  });
+  tasks = loaded.sort((a, b) => {
+    const byUpdate = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    return byUpdate || a.title.localeCompare(b.title, "pl");
+  });
+  persistTaskCache();
+  renderTasks();
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+function isTaskRecord(task) {
+  return task && task.version === TASK_VERSION &&
+    typeof task.id === "string" &&
+    typeof task.title === "string" &&
+    typeof task.description === "string" &&
+    config.team.includes(task.assignee) &&
+    Object.hasOwn(TASK_STATUSES, task.status) &&
+    Object.hasOwn(PRIORITY_LABELS, task.priority) &&
+    typeof task.updatedAt === "string" &&
+    Array.isArray(task.comments) &&
+    task.comments.every(comment => (
+      comment && typeof comment.id === "string" &&
+      config.team.includes(comment.author) &&
+      typeof comment.text === "string" &&
+      typeof comment.createdAt === "string"
+    )) &&
+    (task.linkedFile === null || (
+      task.linkedFile && typeof task.linkedFile.id === "string" &&
+      typeof task.linkedFile.name === "string"
+    ));
+}
+
+async function writeTask(task) {
+  await ensureTasksFolder();
+  const boundary = `pracownia-${crypto.randomUUID()}`;
+  const isUpdate = Boolean(task.fileId);
+  const metadata = isUpdate
+    ? { name: `${task.id}${TASK_FILE_SUFFIX}` }
+    : { name: `${task.id}${TASK_FILE_SUFFIX}`, mimeType: "application/json", parents: [tasksFolderId] };
+  const taskToStore = { ...task };
+  delete taskToStore.fileId;
+  const body = [
+    `--${boundary}\r\n`,
+    "Content-Type: application/json; charset=UTF-8\r\n\r\n",
+    `${JSON.stringify(metadata)}\r\n`,
+    `--${boundary}\r\n`,
+    "Content-Type: application/json\r\n\r\n",
+    `${JSON.stringify(taskToStore)}\r\n`,
+    `--${boundary}--`
+  ].join("");
+  const url = isUpdate
+    ? new URL(`${UPLOAD_API}/${encodeURIComponent(task.fileId)}`)
+    : new URL(UPLOAD_API);
+  url.searchParams.set("uploadType", "multipart");
+  url.searchParams.set("fields", "id");
+  const result = await (await driveFetch(url, {
+    method: isUpdate ? "PATCH" : "POST",
+    headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
+    body
+  })).json();
+  taskContentCache.delete(task.fileId);
+  persistTaskCache();
+  return result.id;
+}
+
+async function removeTask(task) {
+  await driveFetch(fileUrl(task.fileId), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trashed: true })
+  });
+  taskContentCache.delete(task.fileId);
+  persistTaskCache();
+}
+
+async function notifyDiscord(events, task) {
+  if (!config.discordRelayUrl) return { configured: false };
+  const results = [];
+  for (const event of events) {
+    const response = await fetch(config.discordRelayUrl, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify({
+        event,
+        folderId: config.folderId,
+        accessToken: token,
+        pageUrl: window.location.href.split("#")[0],
+        task
+      })
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok || body?.ok !== true) {
+      throw new Error(body?.error || `Pośrednik Discord zwrócił HTTP ${response.status}.`);
+    }
+    results.push(body);
+  }
+  return { configured: true, results };
 }
 
 function formatSize(size) {
@@ -201,9 +482,20 @@ function makeButton(label, title, action) {
   return button;
 }
 
-async function showFolder(nextPath) {
-  const files = await getFiles(nextPath[nextPath.length - 1].id);
+async function showFolder(nextPath, { force = false } = {}) {
+  const folderId = nextPath[nextPath.length - 1].id;
+  const cached = folderCache.get(folderId);
+  const files = !force && cached && Date.now() - cached.at < CACHE_TTL
+    ? cached.files
+    : await getFiles(folderId);
+  folderCache.set(folderId, { files, at: Date.now() });
   path = nextPath;
+  visibleFileCount = FILE_RENDER_BATCH;
+  currentFileOptions = files.filter(file => (
+    file.mimeType !== FOLDER_TYPE &&
+    file.mimeType !== "application/vnd.google-apps.folder" &&
+    file.id !== tasksFolderId
+  ));
   renderPath();
   renderFiles(files);
 }
@@ -224,8 +516,11 @@ function renderPath() {
 
 function renderFiles(files) {
   elements.files.replaceChildren();
-  elements.empty.hidden = files.length > 0;
-  for (const file of files) {
+  visibleFileSource = files.filter(file => file.id !== tasksFolderId && file.name !== config.tasksFolderName);
+  const visibleFiles = visibleFileSource.slice(0, visibleFileCount);
+  elements.empty.hidden = visibleFiles.length > 0;
+  const fragment = document.createDocumentFragment();
+  for (const file of visibleFiles) {
     const isFolder = file.mimeType === FOLDER_TYPE;
     const isGoogleFile = file.mimeType.startsWith("application/vnd.google-apps.");
     const row = document.createElement("div");
@@ -258,8 +553,259 @@ function renderFiles(files) {
     if (!isFolder && !isGoogleFile) actions.append(makeButton("↓", `Pobierz ${file.name}`, () => downloadFile(file)));
     if (file.capabilities?.canTrash) actions.append(makeButton("×", `Przenieś do kosza: ${file.name}`, () => trashFile(file)));
     row.append(name, date, size, actions);
-    elements.files.append(row);
+    fragment.append(row);
   }
+  elements.files.append(fragment);
+  elements["load-more-files"].hidden = visibleFileSource.length <= visibleFileCount;
+  elements["load-more-files"].textContent =
+    `Pokaż więcej (${visibleFileSource.length - Math.min(visibleFileCount, visibleFileSource.length)})`;
+}
+
+function initializeTeamUi() {
+  const members = Array.isArray(config?.team) ? config.team : [];
+  elements["task-assignee"].replaceChildren();
+  elements["task-filters"].replaceChildren();
+  addFilterButton("all", "Wszyscy");
+  for (const member of members) {
+    addSelectOption(elements["task-assignee"], member, member);
+    addFilterButton(member, member);
+  }
+}
+
+function addSelectOption(select, value, text) {
+  const option = document.createElement("option");
+  option.value = value;
+  option.textContent = text;
+  select.append(option);
+}
+
+function addFilterButton(value, label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.dataset.assignee = value;
+  button.textContent = label;
+  button.classList.toggle("active", value === taskFilter);
+  button.addEventListener("click", () => {
+    taskFilter = value;
+    renderTasks();
+  });
+  elements["task-filters"].append(button);
+}
+
+function getProfile() {
+  return currentMember;
+}
+
+function requireProfile() {
+  const member = getProfile();
+  if (!member) {
+    throw new Error(`Konto ${currentUserEmail || "Google"} nie należy do skonfigurowanego zespołu.`);
+  }
+  return member;
+}
+
+async function navigateFromHash() {
+  const route = window.location.hash === "#tasks" ? "tasks" : "files";
+  if (route === activeView) return;
+  setActiveView(route);
+  if (route === "tasks") {
+    renderTasks();
+    await loadTasks();
+  } else {
+    await showFolder(path);
+  }
+}
+
+function setActiveView(view) {
+  if (view === activeView) return;
+  activeView = view;
+  const showTasks = view === "tasks";
+  elements["files-panel"].hidden = showTasks;
+  elements["tasks-panel"].hidden = !showTasks;
+  elements["file-actions"].hidden = showTasks;
+  elements["task-actions"].hidden = !showTasks;
+  elements["files-tab"].classList.toggle("active", !showTasks);
+  elements["tasks-tab"].classList.toggle("active", showTasks);
+  elements["files-tab"].removeAttribute("aria-current");
+  elements["tasks-tab"].removeAttribute("aria-current");
+  (showTasks ? elements["tasks-tab"] : elements["files-tab"]).setAttribute("aria-current", "page");
+  elements["workspace-title"].innerHTML = showTasks
+    ? 'Taski zespołu<span class="brand-dot">.</span>'
+    : 'Pliki zespołu<span class="brand-dot">.</span>';
+  elements["workspace-subtitle"].textContent = showTasks
+    ? "Wszystko, co każdy z nas ma zrobić."
+    : "Wszystko, nad czym razem pracujemy.";
+}
+
+function renderTasks() {
+  const lists = {
+    todo: elements["todo-list"],
+    doing: elements["doing-list"],
+    done: elements["done-list"]
+  };
+  for (const list of Object.values(lists)) list.replaceChildren();
+  const visible = tasks.filter(task => taskFilter === "all" || task.assignee === taskFilter);
+  const fragments = Object.fromEntries(Object.keys(TASK_STATUSES).map(status => [status, document.createDocumentFragment()]));
+  for (const status of Object.keys(TASK_STATUSES)) {
+    const statusTasks = visible.filter(task => task.status === status);
+    elements[`${status}-count`].textContent = String(statusTasks.length);
+    if (!statusTasks.length) {
+      const empty = document.createElement("div");
+      empty.className = "task-empty-column";
+      empty.textContent = "Brak tasków";
+      fragments[status].append(empty);
+    }
+    for (const task of statusTasks) fragments[status].append(makeTaskCard(task));
+  }
+  for (const status of Object.keys(TASK_STATUSES)) lists[status].append(fragments[status]);
+  for (const button of elements["task-filters"].querySelectorAll("button")) {
+    button.classList.toggle("active", button.dataset.assignee === taskFilter);
+  }
+  elements["task-summary"].textContent = `${visible.length} ${visible.length === 1 ? "task" : "tasków"}`;
+  elements["task-tab-count"].textContent = String(tasks.filter(task => task.status !== "done").length || "");
+}
+
+function makeTaskCard(task) {
+  const card = document.createElement("div");
+  card.className = "task-card";
+  card.tabIndex = 0;
+  card.setAttribute("role", "button");
+  card.setAttribute("aria-label", `Edytuj task ${task.title}`);
+  card.addEventListener("click", event => {
+    if (!event.target.closest("a")) openTaskDialog(task);
+  });
+  card.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openTaskDialog(task);
+    }
+  });
+
+  const top = document.createElement("div");
+  top.className = "task-card-top";
+  const title = document.createElement("span");
+  title.className = "task-card-title";
+  title.textContent = task.title;
+  const priority = document.createElement("span");
+  priority.className = `task-priority priority-${task.priority}`;
+  priority.textContent = PRIORITY_LABELS[task.priority];
+  top.append(title, priority);
+
+  const description = document.createElement("p");
+  description.className = "task-card-description";
+  description.textContent = task.description || "Bez opisu";
+
+  const meta = document.createElement("div");
+  meta.className = "task-card-meta";
+  const assignee = document.createElement("span");
+  assignee.className = "task-assignee";
+  const avatar = document.createElement("span");
+  avatar.className = "task-avatar";
+  avatar.textContent = task.assignee.slice(0, 1).toUpperCase();
+  assignee.append(avatar, document.createTextNode(task.assignee));
+  const links = document.createElement("span");
+  links.className = "task-links";
+  if (task.linkedFile) {
+    const link = document.createElement("a");
+    link.href = task.linkedFile.webViewLink ||
+      `https://drive.google.com/file/d/${encodeURIComponent(task.linkedFile.id)}/view`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "Plik ↗";
+    link.title = task.linkedFile.name;
+    link.style.color = "inherit";
+    links.append(link);
+  }
+  if (task.comments.length) links.append(document.createTextNode(`◇ ${task.comments.length}`));
+  meta.append(assignee, links);
+  card.append(top, description, meta);
+  return card;
+}
+
+function openTaskDialog(task = null) {
+  try {
+    const member = requireProfile();
+    editedTask = task ? structuredClone(task) : null;
+    elements["task-form"].reset();
+    populateTaskFileOptions(task?.linkedFile || null);
+    elements["task-dialog-title"].textContent = task ? "Edytuj task" : "Nowy task";
+    elements["delete-task"].hidden = !task;
+    elements["task-comments-section"].hidden = !task?.comments.length;
+    elements["task-comments"].replaceChildren();
+    if (task) {
+      elements["task-title"].value = task.title;
+      elements["task-description"].value = task.description || "";
+      elements["task-assignee"].value = task.assignee;
+      elements["task-status"].value = task.status;
+      elements["task-priority"].value = task.priority;
+      elements["task-file"].value = task.linkedFile?.id || "";
+      renderTaskComments(task.comments);
+    } else {
+      elements["task-assignee"].value = member;
+      elements["task-status"].value = "todo";
+      elements["task-priority"].value = "normal";
+    }
+    elements["task-dialog"].showModal();
+    elements["task-title"].focus();
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+function closeTaskDialog() {
+  if (elements["task-dialog"].open) elements["task-dialog"].close();
+  editedTask = null;
+  elements["task-new-comment"].value = "";
+}
+
+function populateTaskFileOptions(linkedFile) {
+  elements["task-file"].replaceChildren();
+  addSelectOption(elements["task-file"], "", "Bez powiązania");
+  const files = [...currentFileOptions];
+  if (linkedFile && !files.some(file => file.id === linkedFile.id)) files.push(linkedFile);
+  for (const file of files) {
+    addSelectOption(elements["task-file"], file.id, file.name);
+  }
+  const optionData = files.map(file => ({
+    id: file.id,
+    name: file.name,
+    webViewLink: file.webViewLink || null
+  }));
+  elements["task-file"].dataset.options = JSON.stringify(optionData);
+}
+
+function getSelectedTaskFile() {
+  const selectedId = elements["task-file"].value;
+  if (!selectedId) return null;
+  const options = JSON.parse(elements["task-file"].dataset.options || "[]");
+  return options.find(file => file.id === selectedId) || null;
+}
+
+function renderTaskComments(comments) {
+  elements["task-comments"].replaceChildren();
+  for (const comment of comments) {
+    const item = document.createElement("div");
+    item.className = "task-comment";
+    const author = document.createElement("strong");
+    author.textContent = comment.author;
+    const time = document.createElement("time");
+    time.dateTime = comment.createdAt;
+    time.textContent = ` · ${formatDateTime(comment.createdAt)}`;
+    author.append(time);
+    item.append(author, document.createTextNode(comment.text));
+    elements["task-comments"].append(item);
+  }
+  elements["task-comments-section"].hidden = comments.length === 0;
+}
+
+function formatDateTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "nieznana data" : date.toLocaleString("pl-PL", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 async function downloadFile(file) {
@@ -285,7 +831,7 @@ async function trashFile(file) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ trashed: true })
   });
-  await showFolder(path);
+  await showFolder(path, { force: true });
   notice("Przeniesiono do kosza.");
 }
 
@@ -298,7 +844,7 @@ async function createFolder() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: name.trim(), mimeType: FOLDER_TYPE, parents: [path[path.length - 1].id] })
   });
-  await showFolder(path);
+  await showFolder(path, { force: true });
   notice("Folder został utworzony.");
 }
 
@@ -348,6 +894,94 @@ async function uploadFile(file) {
   }
 }
 
+function buildTaskDraft() {
+  const member = requireProfile();
+  const now = new Date().toISOString();
+  const existing = editedTask;
+  const comment = elements["task-new-comment"].value.trim();
+  const comments = existing ? structuredClone(existing.comments) : [];
+  if (comment) {
+    comments.push({
+      id: crypto.randomUUID(),
+      author: member,
+      text: comment,
+      createdAt: now
+    });
+  }
+  return {
+    version: TASK_VERSION,
+    id: existing?.id || crypto.randomUUID(),
+    fileId: existing?.fileId || null,
+    title: elements["task-title"].value.trim(),
+    description: elements["task-description"].value.trim(),
+    assignee: elements["task-assignee"].value,
+    status: elements["task-status"].value,
+    priority: elements["task-priority"].value,
+    linkedFile: getSelectedTaskFile(),
+    comments,
+    createdBy: existing?.createdBy || member,
+    createdAt: existing?.createdAt || now,
+    updatedBy: member,
+    updatedAt: now
+  };
+}
+
+function getTaskEvents(previous, next, commentWasAdded) {
+  if (!previous) return ["created", ...(commentWasAdded ? ["comment"] : [])];
+  const events = [];
+  if (previous.status !== next.status) {
+    events.push(next.status === "done" ? "completed" : "status_changed");
+  }
+  const detailsChanged =
+    previous.title !== next.title ||
+    previous.description !== next.description ||
+    previous.assignee !== next.assignee ||
+    previous.priority !== next.priority ||
+    previous.linkedFile?.id !== next.linkedFile?.id;
+  if (detailsChanged) events.push("updated");
+  if (commentWasAdded) events.push("comment");
+  return events;
+}
+
+async function submitTask() {
+  const task = buildTaskDraft();
+  if (!task.title) throw new Error("Tytuł taska nie może być pusty.");
+  const commentWasAdded = Boolean(elements["task-new-comment"].value.trim());
+  const events = getTaskEvents(editedTask, task, commentWasAdded);
+  task.fileId = await writeTask(task);
+  closeTaskDialog();
+  await loadTasks({ force: true });
+  if (events.length) {
+    notifyDiscordInBackground(events, task);
+  } else {
+    notice("Task zapisano.");
+  }
+}
+
+async function deleteEditedTask() {
+  if (!editedTask) return;
+  requireProfile();
+  if (!window.confirm(`Usunąć task „${editedTask.title}”?`)) return;
+  const deleted = editedTask;
+  await removeTask(deleted);
+  closeTaskDialog();
+  await loadTasks({ force: true });
+  notifyDiscordInBackground(["deleted"], deleted);
+}
+
+function notifyDiscordInBackground(events, task) {
+  if (!config.discordRelayUrl) {
+    notice("Zmiana zapisana. Discord nie jest jeszcze skonfigurowany.");
+    return;
+  }
+  notice("Zmiana zapisana. Wysyłam powiadomienie na Discord...");
+  notifyDiscord(events, task)
+    .then(result => notice(result.configured
+      ? `Zapisano i wysłano powiadomienie na Discord (${events.length}).`
+      : "Zmiana zapisana."))
+    .catch(error => notice(`Zmiana zapisana, ale nie wysłano powiadomienia Discord: ${error.message}`, true));
+}
+
 elements["sign-in"].addEventListener("click", () => {
   if (busy) return;
   if (!config?.clientId || !config?.folderId || !/^[\w-]+$/.test(config.folderId)) {
@@ -383,9 +1017,33 @@ elements["sign-in"].addEventListener("click", () => {
 });
 
 elements["sign-out"].addEventListener("click", () => { if (signOut()) notice("Wylogowano."); });
-elements.refresh.addEventListener("click", () => run(() => showFolder(path)));
+elements.refresh.addEventListener("click", () => run(() => showFolder(path, { force: true })));
+elements["load-more-files"].addEventListener("click", () => {
+  visibleFileCount += FILE_RENDER_BATCH;
+  renderFiles(visibleFileSource);
+});
 elements["new-folder"].addEventListener("click", () => run(createFolder));
 elements.upload.addEventListener("click", () => elements["file-input"].click());
+elements["new-task"].addEventListener("click", () => openTaskDialog());
+for (const [element, route] of [[elements["files-tab"], "files"], [elements["tasks-tab"], "tasks"]]) {
+  element.addEventListener("click", event => {
+    event.preventDefault();
+    const hash = `#${route}`;
+    if (window.location.hash !== hash) history.pushState(null, "", hash);
+    navigateFromHash().catch(error => notice(error.message, true));
+  });
+}
+elements["close-task-dialog"].addEventListener("click", closeTaskDialog);
+elements["cancel-task"].addEventListener("click", closeTaskDialog);
+elements["delete-task"].addEventListener("click", () => run(deleteEditedTask));
+elements["task-form"].addEventListener("submit", event => {
+  event.preventDefault();
+  run(submitTask);
+});
+elements["task-dialog"].addEventListener("cancel", event => {
+  event.preventDefault();
+  closeTaskDialog();
+});
 elements["file-input"].addEventListener("change", event => {
   const files = [...event.target.files];
   event.target.value = "";
@@ -399,10 +1057,10 @@ elements["file-input"].addEventListener("change", event => {
         uploaded++;
       }
     } catch (error) {
-      if (token) await showFolder(path);
+      if (token) await showFolder(path, { force: true });
       throw new Error(`Przesłano ${uploaded} z ${files.length} plików. ${error.message}`);
     }
-    await showFolder(path);
+    await showFolder(path, { force: true });
     notice(`Przesłano pliki: ${uploaded}.`);
   });
 });
@@ -414,4 +1072,20 @@ window.addEventListener("storage", event => {
   }
 });
 
+window.addEventListener("hashchange", () => {
+  if (token) navigateFromHash().catch(error => notice(error.message, true));
+});
+window.addEventListener("popstate", () => {
+  if (token) navigateFromHash().catch(error => notice(error.message, true));
+});
+
+setInterval(() => {
+  if (document.visibilityState === "visible" && token && activeView === "tasks" &&
+      !busy && !elements["task-dialog"].open) {
+    loadTasks().catch(error => notice(`Nie można odświeżyć tasków: ${error.message}`, true));
+  }
+}, TASK_REFRESH_INTERVAL);
+
+initializeTeamUi();
+restoreTaskCache();
 restoreSession();
