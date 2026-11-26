@@ -28,13 +28,17 @@ const elements = Object.fromEntries([
   "welcome", "workspace", "sign-in", "sign-out", "new-folder", "upload",
   "file-input", "refresh", "breadcrumbs", "files", "empty", "notice",
   "profile-control", "profile-avatar", "current-member", "workspace-title", "workspace-subtitle",
-  "file-actions", "task-actions", "files-tab", "tasks-tab", "files-panel",
+  "file-actions", "task-actions", "dashboard-tab", "files-tab", "tasks-tab",
+  "dashboard-panel", "files-panel",
   "tasks-panel", "task-tab-count", "task-filters", "task-summary",
   "todo-count", "doing-count", "done-count", "todo-list", "doing-list",
   "done-list", "new-task", "task-dialog", "task-form", "task-dialog-title",
   "close-task-dialog", "cancel-task", "task-title", "task-description",
   "task-assignee", "task-status", "task-priority", "task-file",
   "task-comments-section", "task-comments", "task-new-comment", "delete-task",
+  "dashboard-open-count", "dashboard-progress-label", "dashboard-mine-count",
+  "dashboard-doing-count", "dashboard-done-count", "dashboard-my-tasks",
+  "dashboard-team", "dashboard-activity",
   "load-more-files"
 ].map(id => [id, document.getElementById(id)]));
 
@@ -49,6 +53,7 @@ let taskFilter = "all";
 let visibleFileCount = FILE_RENDER_BATCH;
 let visibleFileSource = [];
 let editedTask = null;
+const pendingTaskIds = new Set();
 let currentUserEmail = "";
 let currentMember = null;
 let loadingTasks = null;
@@ -605,10 +610,12 @@ function requireProfile() {
 }
 
 async function navigateFromHash() {
-  const route = window.location.hash === "#tasks" ? "tasks" : "files";
+  const route = ["dashboard", "tasks", "files"].includes(window.location.hash.slice(1))
+    ? window.location.hash.slice(1)
+    : "dashboard";
   if (route === activeView) return;
   setActiveView(route);
-  if (route === "tasks") {
+  if (route === "dashboard" || route === "tasks") {
     renderTasks();
     await loadTasks();
   } else {
@@ -619,22 +626,31 @@ async function navigateFromHash() {
 function setActiveView(view) {
   if (view === activeView) return;
   activeView = view;
-  const showTasks = view === "tasks";
-  elements["files-panel"].hidden = showTasks;
-  elements["tasks-panel"].hidden = !showTasks;
-  elements["file-actions"].hidden = showTasks;
-  elements["task-actions"].hidden = !showTasks;
-  elements["files-tab"].classList.toggle("active", !showTasks);
-  elements["tasks-tab"].classList.toggle("active", showTasks);
-  elements["files-tab"].removeAttribute("aria-current");
-  elements["tasks-tab"].removeAttribute("aria-current");
-  (showTasks ? elements["tasks-tab"] : elements["files-tab"]).setAttribute("aria-current", "page");
-  elements["workspace-title"].innerHTML = showTasks
-    ? 'Taski zespołu<span class="brand-dot">.</span>'
-    : 'Pliki zespołu<span class="brand-dot">.</span>';
-  elements["workspace-subtitle"].textContent = showTasks
-    ? "Wszystko, co każdy z nas ma zrobić."
-    : "Wszystko, nad czym razem pracujemy.";
+  const sections = {
+    dashboard: elements["dashboard-panel"],
+    files: elements["files-panel"],
+    tasks: elements["tasks-panel"]
+  };
+  for (const [name, element] of Object.entries(sections)) element.hidden = name !== view;
+  elements["file-actions"].hidden = view !== "files";
+  elements["task-actions"].hidden = view !== "tasks";
+  const tabs = {
+    dashboard: elements["dashboard-tab"],
+    files: elements["files-tab"],
+    tasks: elements["tasks-tab"]
+  };
+  for (const [name, tab] of Object.entries(tabs)) {
+    tab.classList.toggle("active", name === view);
+    tab.removeAttribute("aria-current");
+    if (name === view) tab.setAttribute("aria-current", "page");
+  }
+  const headings = {
+    dashboard: ["Pulpit zespołu", "Najważniejsze rzeczy w jednym widoku."],
+    files: ["Pliki zespołu", "Wszystko, nad czym razem pracujemy."],
+    tasks: ["Taski zespołu", "Przeciągaj zadania i przesuwaj pracę do przodu."]
+  };
+  elements["workspace-title"].innerHTML = `${headings[view][0]}<span class="brand-dot">.</span>`;
+  elements["workspace-subtitle"].textContent = headings[view][1];
 }
 
 function renderTasks() {
@@ -663,11 +679,122 @@ function renderTasks() {
   }
   elements["task-summary"].textContent = `${visible.length} ${visible.length === 1 ? "task" : "tasków"}`;
   elements["task-tab-count"].textContent = String(tasks.filter(task => task.status !== "done").length || "");
+  renderDashboard();
+}
+
+function renderDashboard() {
+  const open = tasks.filter(task => task.status !== "done");
+  const doing = tasks.filter(task => task.status === "doing");
+  const done = tasks.filter(task => task.status === "done");
+  const mine = open.filter(task => task.assignee === currentMember);
+  const completion = tasks.length ? Math.round(done.length / tasks.length * 100) : 0;
+  elements["dashboard-open-count"].textContent = String(open.length);
+  elements["dashboard-progress-label"].textContent = `${completion}% ukończonych`;
+  elements["dashboard-mine-count"].textContent = String(mine.length);
+  elements["dashboard-doing-count"].textContent = String(doing.length);
+  elements["dashboard-done-count"].textContent = String(done.length);
+  renderDashboardTasks(mine);
+  renderTeamOverview(open);
+  renderDashboardActivity();
+}
+
+function renderDashboardTasks(myTasks) {
+  elements["dashboard-my-tasks"].replaceChildren();
+  const important = [...myTasks].sort((a, b) => {
+    const priority = { high: 0, normal: 1, low: 2 };
+    return priority[a.priority] - priority[b.priority] ||
+      new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+  }).slice(0, 5);
+  if (!important.length) {
+    elements["dashboard-my-tasks"].append(makeDashboardEmpty(
+      currentMember ? `Brak otwartych zadań dla: ${currentMember}.` : "Zaloguj się kontem zespołu, aby zobaczyć swoje zadania."
+    ));
+    return;
+  }
+  for (const task of important) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "dashboard-task";
+    row.addEventListener("click", () => openTaskDialog(task));
+    const copy = document.createElement("span");
+    copy.className = "dashboard-task-copy";
+    const title = document.createElement("strong");
+    title.textContent = task.title;
+    const state = document.createElement("small");
+    state.textContent = `${TASK_STATUSES[task.status]} · ${PRIORITY_LABELS[task.priority]}`;
+    copy.append(title, state);
+    const arrow = document.createElement("span");
+    arrow.className = "dashboard-task-arrow";
+    arrow.textContent = "→";
+    row.append(copy, arrow);
+    elements["dashboard-my-tasks"].append(row);
+  }
+}
+
+function renderTeamOverview(openTasks) {
+  elements["dashboard-team"].replaceChildren();
+  for (const member of config.team) {
+    const memberTasks = openTasks.filter(task => task.assignee === member);
+    const active = memberTasks.filter(task => task.status === "doing").length;
+    const row = document.createElement("div");
+    row.className = "team-member-row";
+    const avatar = document.createElement("span");
+    avatar.className = "task-avatar";
+    avatar.textContent = member.slice(0, 1).toUpperCase();
+    const name = document.createElement("strong");
+    name.textContent = member;
+    if (member === currentMember) name.append(" (Ty)");
+    const load = document.createElement("span");
+    load.textContent = `${active} w trakcie · ${memberTasks.length} otwartych`;
+    const meter = document.createElement("span");
+    meter.className = "team-member-meter";
+    const fill = document.createElement("span");
+    fill.style.width = `${Math.min(100, memberTasks.length / Math.max(1, open.length) * 100)}%`;
+    meter.append(fill);
+    row.append(avatar, name, load, meter);
+    elements["dashboard-team"].append(row);
+  }
+}
+
+function renderDashboardActivity() {
+  elements["dashboard-activity"].replaceChildren();
+  const recent = [...tasks]
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+    .slice(0, 7);
+  if (!recent.length) {
+    elements["dashboard-activity"].append(makeDashboardEmpty("Pierwszy task pojawi się tutaj po utworzeniu."));
+    return;
+  }
+  for (const task of recent) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "activity-row";
+    row.addEventListener("click", () => openTaskDialog(task));
+    const dot = document.createElement("span");
+    dot.className = `activity-dot status-${task.status}`;
+    const copy = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = task.title;
+    const detail = document.createElement("small");
+    detail.textContent = `${task.updatedBy || task.assignee} · ${TASK_STATUSES[task.status]} · ${formatDateTime(task.updatedAt)}`;
+    copy.append(title, detail);
+    row.append(dot, copy);
+    elements["dashboard-activity"].append(row);
+  }
+}
+
+function makeDashboardEmpty(message) {
+  const empty = document.createElement("p");
+  empty.className = "dashboard-empty";
+  empty.textContent = message;
+  return empty;
 }
 
 function makeTaskCard(task) {
   const card = document.createElement("div");
   card.className = "task-card";
+  card.dataset.taskId = task.id;
+  card.draggable = Boolean(currentMember) && !pendingTaskIds.has(task.id);
   card.tabIndex = 0;
   card.setAttribute("role", "button");
   card.setAttribute("aria-label", `Edytuj task ${task.title}`);
@@ -679,6 +806,16 @@ function makeTaskCard(task) {
       event.preventDefault();
       openTaskDialog(task);
     }
+  });
+  card.addEventListener("dragstart", event => {
+    if (!card.draggable) return;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", task.id);
+    requestAnimationFrame(() => card.classList.add("dragging"));
+  });
+  card.addEventListener("dragend", () => {
+    card.classList.remove("dragging");
+    document.querySelectorAll(".task-column.drag-over").forEach(column => column.classList.remove("drag-over"));
   });
 
   const top = document.createElement("div");
@@ -718,8 +855,79 @@ function makeTaskCard(task) {
   }
   if (task.comments.length) links.append(document.createTextNode(`◇ ${task.comments.length}`));
   meta.append(assignee, links);
-  card.append(top, description, meta);
+  const statusControl = document.createElement("label");
+  statusControl.className = "task-quick-status";
+  const statusLabel = document.createElement("span");
+  statusLabel.textContent = "Status";
+  const statusSelect = document.createElement("select");
+  statusSelect.setAttribute("aria-label", `Zmień status: ${task.title}`);
+  for (const [value, label] of Object.entries(TASK_STATUSES)) {
+    addSelectOption(statusSelect, value, label);
+  }
+  statusSelect.value = task.status;
+  statusSelect.disabled = pendingTaskIds.has(task.id) || !currentMember;
+  statusSelect.addEventListener("click", event => event.stopPropagation());
+  statusSelect.addEventListener("change", () => changeTaskStatus(task.id, statusSelect.value));
+  statusControl.append(statusLabel, statusSelect);
+  card.append(top, description, meta, statusControl);
   return card;
+}
+
+async function changeTaskStatus(taskId, status) {
+  try {
+    requireProfile();
+    if (!Object.hasOwn(TASK_STATUSES, status)) throw new Error("Nieznany status taska.");
+    const index = tasks.findIndex(task => task.id === taskId);
+    if (index < 0 || pendingTaskIds.has(taskId) || tasks[index].status === status) return;
+    const previous = tasks[index];
+    const updated = {
+      ...previous,
+      status,
+      updatedBy: currentMember,
+      updatedAt: new Date().toISOString()
+    };
+    pendingTaskIds.add(taskId);
+    tasks[index] = updated;
+    renderTasks();
+    try {
+      updated.fileId = await writeTask(updated);
+      tasks[index] = updated;
+      notifyDiscordInBackground(
+        [status === "done" ? "completed" : "status_changed"],
+        updated
+      );
+    } catch (error) {
+      tasks[index] = previous;
+      renderTasks();
+      throw error;
+    } finally {
+      pendingTaskIds.delete(taskId);
+      renderTasks();
+    }
+  } catch (error) {
+    notice(error.message || "Nie można zmienić statusu taska.", true);
+  }
+}
+
+function initializeDragAndDrop() {
+  for (const column of document.querySelectorAll(".task-column")) {
+    column.addEventListener("dragover", event => {
+      if (!currentMember || pendingTaskIds.size) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      column.classList.add("drag-over");
+    });
+    column.addEventListener("dragleave", event => {
+      if (!column.contains(event.relatedTarget)) column.classList.remove("drag-over");
+    });
+    column.addEventListener("drop", event => {
+      event.preventDefault();
+      column.classList.remove("drag-over");
+      const taskId = event.dataTransfer.getData("text/plain");
+      const status = column.dataset.status;
+      if (taskId && status) changeTaskStatus(taskId, status);
+    });
+  }
 }
 
 function openTaskDialog(task = null) {
@@ -1025,7 +1233,11 @@ elements["load-more-files"].addEventListener("click", () => {
 elements["new-folder"].addEventListener("click", () => run(createFolder));
 elements.upload.addEventListener("click", () => elements["file-input"].click());
 elements["new-task"].addEventListener("click", () => openTaskDialog());
-for (const [element, route] of [[elements["files-tab"], "files"], [elements["tasks-tab"], "tasks"]]) {
+for (const [element, route] of [
+  [elements["dashboard-tab"], "dashboard"],
+  [elements["files-tab"], "files"],
+  [elements["tasks-tab"], "tasks"]
+]) {
   element.addEventListener("click", event => {
     event.preventDefault();
     const hash = `#${route}`;
@@ -1080,12 +1292,13 @@ window.addEventListener("popstate", () => {
 });
 
 setInterval(() => {
-  if (document.visibilityState === "visible" && token && activeView === "tasks" &&
+  if (document.visibilityState === "visible" && token && (activeView === "tasks" || activeView === "dashboard") &&
       !busy && !elements["task-dialog"].open) {
     loadTasks().catch(error => notice(`Nie można odświeżyć tasków: ${error.message}`, true));
   }
 }, TASK_REFRESH_INTERVAL);
 
 initializeTeamUi();
+initializeDragAndDrop();
 restoreTaskCache();
 restoreSession();

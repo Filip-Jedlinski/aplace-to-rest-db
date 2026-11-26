@@ -41,8 +41,8 @@
         <div class="workspace-heading">
           <div>
             <p class="eyebrow">PRACOWNIA ZESPOŁU</p>
-            <h1 id="workspace-title">Pliki zespołu<span class="brand-dot">.</span></h1>
-            <p id="workspace-subtitle">Wszystko, nad czym razem pracujemy.</p>
+            <h1 id="workspace-title">Pulpit zespołu<span class="brand-dot">.</span></h1>
+            <p id="workspace-subtitle">Najważniejsze rzeczy w jednym widoku.</p>
           </div>
           <div id="file-actions" class="actions">
             <button id="new-folder" class="button button-secondary">+ Nowy folder</button>
@@ -54,9 +54,55 @@
           </div>
         </div>
         <nav class="view-switcher" aria-label="Podstrony pracowni">
-          <a id="files-tab" class="active" href="#files" aria-current="page">Pliki</a>
+          <a id="dashboard-tab" class="active" href="#dashboard" aria-current="page">Pulpit</a>
+          <a id="files-tab" href="#files">Pliki</a>
           <a id="tasks-tab" href="#tasks">Taski <span id="task-tab-count"></span></a>
         </nav>
+        <section id="dashboard-panel" class="dashboard-panel" aria-label="Pulpit zespołu">
+          <div class="dashboard-stats">
+            <article class="stat-card stat-card-primary">
+              <span>Otwarte taski</span>
+              <strong id="dashboard-open-count">0</strong>
+              <small id="dashboard-progress-label">0% ukończonych</small>
+            </article>
+            <article class="stat-card">
+              <span>Moje zadania</span>
+              <strong id="dashboard-mine-count">0</strong>
+              <small>nieukończone</small>
+            </article>
+            <article class="stat-card">
+              <span>W trakcie</span>
+              <strong id="dashboard-doing-count">0</strong>
+              <small>aktywnie realizowane</small>
+            </article>
+            <article class="stat-card">
+              <span>Ukończone</span>
+              <strong id="dashboard-done-count">0</strong>
+              <small>wszystkie gotowe taski</small>
+            </article>
+          </div>
+          <div class="dashboard-grid">
+            <section class="dashboard-card">
+              <div class="dashboard-card-heading">
+                <div><p class="eyebrow">NAJBLIŻSZY RUCH</p><h2>Moje zadania</h2></div>
+                <a href="#tasks">Wszystkie taski ↗</a>
+              </div>
+              <div id="dashboard-my-tasks" class="dashboard-task-list"></div>
+            </section>
+            <section class="dashboard-card">
+              <div class="dashboard-card-heading">
+                <div><p class="eyebrow">OBCIĄŻENIE</p><h2>Zespół</h2></div>
+              </div>
+              <div id="dashboard-team" class="team-overview"></div>
+            </section>
+            <section class="dashboard-card dashboard-activity">
+              <div class="dashboard-card-heading">
+                <div><p class="eyebrow">OSTATNIE ZMIANY</p><h2>Aktywność</h2></div>
+              </div>
+              <div id="dashboard-activity" class="activity-list"></div>
+            </section>
+          </div>
+        </section>
         <div id="files-panel" class="file-panel">
           <div class="panel-top">
             <nav id="breadcrumbs" class="breadcrumbs" aria-label="Ścieżka folderu"></nav>
@@ -76,6 +122,7 @@
             </div>
             <span id="task-summary" class="task-summary"></span>
           </div>
+          <p class="drag-hint">Przeciągnij kartę do innej kolumny. Na telefonie użyj pola „Status” na karcie.</p>
           <div class="task-board">
             <section class="task-column" data-status="todo">
               <div class="task-column-heading"><h2>Do zrobienia</h2><span id="todo-count">0</span></div>
